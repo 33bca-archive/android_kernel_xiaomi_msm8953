@@ -239,10 +239,10 @@ enum fg_mem_data_index {
 
 static struct fg_mem_setting settings[FG_MEM_SETTING_MAX] = {
 	/*       ID                    Address, Offset, Value*/
-	SETTING(SOFT_COLD,       0x454,   0,      100),
-	SETTING(SOFT_HOT,        0x454,   1,      400),
-	SETTING(HARD_COLD,       0x454,   2,      50),
-	SETTING(HARD_HOT,        0x454,   3,      450),
+	SETTING(SOFT_COLD,       0x454,   0,      150),
+	SETTING(SOFT_HOT,        0x454,   1,      450),
+	SETTING(HARD_COLD,       0x454,   2,      0),
+	SETTING(HARD_HOT,        0x454,   3,      600),
 	SETTING(RESUME_SOC,      0x45C,   1,      0),
 	SETTING(BCL_LM_THRESHOLD, 0x47C,   2,      50),
 	SETTING(BCL_MH_THRESHOLD, 0x47C,   3,      752),
@@ -250,7 +250,7 @@ static struct fg_mem_setting settings[FG_MEM_SETTING_MAX] = {
 	SETTING(CHG_TERM_CURRENT, 0x4F8,   2,      250),
 	SETTING(IRQ_VOLT_EMPTY,	 0x458,   3,      3100),
 	SETTING(CUTOFF_VOLTAGE,	 0x40C,   0,      3200),
-	SETTING(VBAT_EST_DIFF,	 0x000,   0,      30),
+	SETTING(VBAT_EST_DIFF,	 0x000,   0,      200),
 	SETTING(DELTA_SOC,	 0x450,   3,      1),
 	SETTING(BATT_LOW,	 0x458,   0,      4200),
 	SETTING(THERM_DELAY,	 0x4AC,   3,      0),
@@ -332,7 +332,7 @@ module_param_named(
 	battery_type, fg_batt_type, charp, 00600
 );
 
-static int fg_sram_update_period_ms = 30000;
+static int fg_sram_update_period_ms = 3000;
 module_param_named(
 	sram_update_period_ms, fg_sram_update_period_ms, int, 00600
 );
@@ -2021,11 +2021,6 @@ static void fg_handle_battery_insertion(struct fg_chip *chip)
 }
 
 
-static int soc_to_setpoint(int soc)
-{
-	return DIV_ROUND_CLOSEST(soc * 255, 100);
-}
-
 static void batt_to_setpoint_adc(int vbatt_mv, u8 *data)
 {
 	int val;
@@ -2239,15 +2234,21 @@ static int get_monotonic_soc_raw(struct fg_chip *chip)
 #define FULL_SOC_RAW		0xFF
 static int get_prop_capacity(struct fg_chip *chip)
 {
-	int msoc, rc;
+	int msoc, rc, soc_tmp;
 	bool vbatt_low_sts;
 
 	if (chip->use_last_soc && chip->last_soc) {
 		if (chip->last_soc == FULL_SOC_RAW)
 			return FULL_CAPACITY;
-		return DIV_ROUND_CLOSEST((chip->last_soc - 1) *
+		soc_tmp = DIV_ROUND_CLOSEST((chip->last_soc - 1) *
 				(FULL_CAPACITY - 2),
 				FULL_SOC_RAW - 2) + 1;
+	if (chip->status == POWER_SUPPLY_STATUS_FULL && soc_tmp == 99) {
+		soc_tmp = 100;
+		pr_err("Full, Update soc_tmp.\n");
+	}
+
+	return soc_tmp;
 	}
 
 	if (chip->battery_missing)
@@ -4023,7 +4024,7 @@ static void status_change_work(struct work_struct *work)
 
 	if (chip->status == POWER_SUPPLY_STATUS_FULL) {
 		if (capacity >= 99 && chip->hold_soc_while_full
-				&& chip->health == POWER_SUPPLY_HEALTH_GOOD) {
+				&& (chip->health == POWER_SUPPLY_HEALTH_GOOD || chip->health == POWER_SUPPLY_HEALTH_COOL)) {
 			if (fg_debug_mask & FG_STATUS)
 				pr_info("holding soc at 100\n");
 			chip->charge_full = true;
@@ -4628,10 +4629,10 @@ static int fg_power_get_property(struct power_supply *psy,
 			val->intval = 1;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
-		val->intval = chip->nom_cap_uah;
+		val->intval = 4000000;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
-		val->intval = chip->learning_data.learned_cc_uah;
+		val->intval = 4000000;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_NOW:
 		val->intval = chip->learning_data.cc_uah;
@@ -6680,6 +6681,7 @@ static void charge_full_work(struct work_struct *work)
 	int resume_soc_raw = settings[FG_MEM_RESUME_SOC].value;
 	bool disable = false;
 	u8 reg;
+	int msoc, retry = 0;
 
 	if (chip->status != POWER_SUPPLY_STATUS_FULL) {
 		if (fg_debug_mask & FG_STATUS)
@@ -6722,6 +6724,13 @@ static void charge_full_work(struct work_struct *work)
 		pr_info("wrote %06x into soc full\n", bsoc);
 	}
 	fg_mem_release(chip);
+
+	while(msoc != 0xFF && retry != 8) {
+		msleep(200);
+		msoc = get_monotonic_soc_raw(chip);
+		retry++;
+	}
+
 	/*
 	 * wait one cycle to make sure the soc is updated before clearing
 	 * the soc mask bit
@@ -8028,7 +8037,7 @@ static int fg_common_hw_init(struct fg_chip *chip)
 	}
 
 	rc = fg_mem_masked_write(chip, settings[FG_MEM_DELTA_SOC].address, 0xFF,
-			soc_to_setpoint(settings[FG_MEM_DELTA_SOC].value),
+			1,
 			settings[FG_MEM_DELTA_SOC].offset);
 	if (rc) {
 		pr_err("failed to write delta soc rc=%d\n", rc);
@@ -8666,6 +8675,50 @@ done:
 	fg_cleanup(chip);
 }
 
+#define SOC_LOW_PWR_CFG 0xF5
+#define LO_FRQ_CLKSWITCH_EN BIT(0)
+
+static void fg_adc_clk_change(struct fg_chip *chip, int val)
+{
+	u8 reg = 0;
+	int rc = 0;
+
+	if (val > 1 || val < 0) {
+		pr_err(":%s Invalid Value %d, Return!\n",__func__,val);
+		return;
+	}
+	chip->fg_restarting = true;
+
+	rc = fg_read(chip, &reg, chip->soc_base + SOC_LOW_PWR_CFG, 1);
+	if (rc) {
+		pr_err(":%s failed to read SOC_LOW_PWR_CFG\n",__func__);
+
+	}
+	pr_err(":%s SOC_LOW_PWR_CFG = 0x%02x\n",__func__,reg);
+	usleep_range(5000,6000);
+
+	rc = fg_sec_masked_write(chip, chip->soc_base + SOC_LOW_PWR_CFG, LO_FRQ_CLKSWITCH_EN, val, 1);
+	if (rc) {
+		pr_err(":%s failed to change FG ADC Clk\n",__func__);
+		goto adc_clk_change_fail;
+	}
+	usleep_range(5000,6000);
+
+	rc = fg_read(chip, &reg, chip->soc_base + SOC_LOW_PWR_CFG, 1);
+	if (rc) {
+		pr_err(":%s failed to read SOC_LOW_PWR_CFG\n",__func__);
+		goto adc_clk_change_fail;
+	}
+	pr_err(":%s SOC_LOW_PWR_CFG = 0x%02x\n",__func__,reg);
+
+	chip->fg_restarting = false;
+	pr_err(":%s Success change FG ADC Clk\n",__func__);
+	return;
+
+adc_clk_change_fail:
+	chip->fg_restarting = false;
+}
+
 static int fg_probe(struct platform_device *pdev)
 {
 	struct device *dev = &(pdev->dev);
@@ -8855,6 +8908,8 @@ static int fg_probe(struct platform_device *pdev)
 		pr_err("failed to clear interrupts %d\n", rc);
 		goto of_init_fail;
 	}
+
+	fg_adc_clk_change(chip,1);
 
 	rc = fg_init_irqs(chip);
 	if (rc) {
