@@ -1,0 +1,8 @@
+#include "daisy-general.dtsi"
+#include "daisy-pinctrl.dtsi"
+#include "daisy-pm.dtsi"
+#include "daisy-regulator.dtsi"
+#include "daisy-audio.dtsi"
+#include "daisy-mdss.dtsi"
+#include "daisy-qrd.dtsi"
+#include "daisy-camera.dtsi"
