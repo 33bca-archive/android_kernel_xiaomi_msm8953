@@ -41,7 +41,6 @@
 #include <linux/fb.h>
 #include <linux/pm_qos.h>
 #include <linux/cpufreq.h>
-#include <linux/wakelock.h>
 #include <linux/mdss_io_util.h>
 #include "gf_spi.h"
 
@@ -77,7 +76,7 @@ static int SPIDEV_MAJOR;
 static DECLARE_BITMAP(minors, N_SPI_MINORS);
 static LIST_HEAD(device_list);
 static DEFINE_MUTEX(device_list_lock);
-static struct wake_lock fp_wakelock;
+static struct wakeup_source fp_wakelock;
 static struct gf_dev gf;
 
 static struct gf_key_map maps[] = {
@@ -335,7 +334,7 @@ static irqreturn_t gf_irq(int irq, void *handle)
     struct gf_dev *gf_dev = &gf;
 	char msg = GF_NET_EVENT_IRQ;
 
-	wake_lock_timeout(&fp_wakelock, msecs_to_jiffies(WAKELOCK_HOLD_TIME));
+	__pm_wakeup_event(&fp_wakelock, msecs_to_jiffies(WAKELOCK_HOLD_TIME));
 
 	sendnlmsg(&msg);
 
@@ -664,8 +663,6 @@ static int goodix_fb_state_chg_callback(struct notifier_block *nb,
 	unsigned int blank;
 	char msg = 0;
 
-
-	printk("SXF Enter %s val = %d \n ",__func__,(int)val);
 	if (val != FB_EVENT_BLANK)
 		return 0;
 	pr_info("[info] %s go to the goodix_fb_state_chg_callback value = %d\n",
@@ -675,7 +672,6 @@ static int goodix_fb_state_chg_callback(struct notifier_block *nb,
 
 	if (evdata && evdata->data && val == FB_EVENT_BLANK && gf_dev) {
 		blank = *(int *)(evdata->data);
-		printk("SXF_blank = %d\n",blank);
 		switch (blank) {
 		case FB_BLANK_POWERDOWN:
 			if (gf_dev->device_available == 1) {
@@ -691,7 +687,6 @@ static int goodix_fb_state_chg_callback(struct notifier_block *nb,
 			}
 			break;
 		case FB_BLANK_UNBLANK:
-		    printk("SXF-FB_BLANK_UNBLANK \n");
 			if (gf_dev->device_available == 1) {
 				gf_dev->fb_black = 0;
 #if defined(GF_NETLINK_ENABLE)
@@ -708,7 +703,6 @@ static int goodix_fb_state_chg_callback(struct notifier_block *nb,
 			break;
 		}
 	}
-	printk("SXF Exit %s\n ",__func__);
 	return NOTIFY_OK;
 }
 
@@ -805,7 +799,7 @@ static int gf_probe(struct platform_device *pdev)
 	gf_dev->notifier = goodix_noti_block;
 	fb_register_client(&gf_dev->notifier);
 
-	wake_lock_init(&fp_wakelock, WAKE_LOCK_SUSPEND, "fp_wakelock");
+	wakeup_source_init(&fp_wakelock, "fp_wakelock");
 
 	pr_info("version V%d.%d.%02d\n", VER_MAJOR, VER_MINOR, PATCH_LEVEL);
 printk("gf probe success\n");
@@ -843,7 +837,7 @@ static int gf_remove(struct platform_device *pdev)
 {
 	struct gf_dev *gf_dev = &gf;
 
-	wake_lock_destroy(&fp_wakelock);
+	wakeup_source_trash(&fp_wakelock);
 	fb_unregister_client(&gf_dev->notifier);
 	if (gf_dev->input)
 		input_unregister_device(gf_dev->input);
